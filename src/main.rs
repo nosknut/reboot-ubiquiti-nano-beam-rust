@@ -2,13 +2,13 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use cronjob::CronJob;
 use dotenvy::dotenv_override;
 use headless_chrome::{Browser, LaunchOptions};
-use std::{env, thread, time};
+use log::{debug, error, info};
+use std::{env, path::PathBuf, thread, time};
 
 fn login(
     username: &str,
     password: &str,
     default_gateway: &str,
-    debug: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let browser = Browser::new(
         LaunchOptions::default_builder()
@@ -18,16 +18,13 @@ fn login(
             .expect("Could not find Chrome binary"),
     )?;
 
-    if debug {
-        println!("[1/5] Opening page ...");
-    }
+    debug!("[1/5] Opening page ...");
+
     let tab = browser.new_tab()?;
     tab.navigate_to(&default_gateway)?;
     tab.wait_until_navigated()?;
 
-    if debug {
-        println!("[2/5] Logging in ...");
-    }
+    debug!("[2/5] Logging in ...");
 
     tab.wait_for_element("#loginform-username")?.click()?;
     tab.type_str(&username)?.press_key("Enter")?;
@@ -35,20 +32,16 @@ fn login(
     tab.wait_for_element("#loginform-password")?.click()?;
     tab.type_str(&password)?.press_key("Enter")?;
 
-    if debug {
-        println!("[3/5] Confirming login ...");
-    }
+    debug!("[3/5] Confirming login ...");
+
     tab.wait_until_navigated()?;
 
-    if debug {
-        println!("[4/5] Rebooting connection ...");
-    }
+    debug!("[4/5] Rebooting connection ...");
+
     thread::sleep(time::Duration::from_secs(3));
     tab.wait_for_element(".ubnt-icon--refresh")?.click()?;
 
-    if debug {
-        println!("[5/5] Done!");
-    }
+    debug!("[5/5] Done!");
 
     Ok(())
 }
@@ -59,20 +52,17 @@ fn reboot_router() -> Result<(), Box<dyn std::error::Error>> {
     let password = env::var("PASSWORD").expect("PASSWORD is not defined");
     let default_gateway = env::var("DEFAULT_GATEWAY").expect("DEFAULT_GATEWAY is not defined");
 
-    let matches = get_args();
-    let debug = *matches.get_one::<bool>("debug").unwrap_or(&false);
-
-    login(&username, &password, &default_gateway, debug)?;
+    login(&username, &password, &default_gateway)?;
 
     Ok(())
 }
 
 fn on_cron(str: &str) {
-    println!("Running cron job: {}", str);
+    info!("Running cron job: {}", str);
 
     // TODO: Handle this error
-    if let Err(_e) = reboot_router() {
-        println!("Error!");
+    if let Err(e) = reboot_router() {
+        error!("{}", e);
     }
 }
 
@@ -83,6 +73,14 @@ fn get_args() -> ArgMatches {
                 .short('d')
                 .help("Turn debugging information on")
                 .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("log")
+                .long("logfile")
+                .short('l')
+                .help("Path to the file containing the logs")
+                .value_parser(clap::value_parser!(PathBuf))
+                .action(ArgAction::Set),
         )
         .subcommand(
             Command::new("cron")
@@ -116,8 +114,26 @@ fn get_args() -> ArgMatches {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = get_args();
 
+    let log_level = match matches.get_one::<bool>("debug") {
+        Some(true) => log::LevelFilter::Debug,
+        _ => log::LevelFilter::Info,
+    };
+
+    let log_target = if let Some(log_file) = matches.get_one::<PathBuf>("log") {
+        env_logger::Target::Pipe(Box::from(std::fs::File::create(log_file)?))
+    } else {
+        env_logger::Target::Stdout
+    };
+
+    env_logger::builder()
+        .filter_level(log_level)
+        .filter_module("headless_chrome", log::LevelFilter::Warn)
+        .filter_module("tungstenite", log::LevelFilter::Warn)
+        .target(log_target)
+        .init();
+
     if let Some(matches) = matches.subcommand_matches("cron") {
-        println!("Running as a cron job");
+        info!("Running as a cron job");
 
         let mut cron = CronJob::new("Reboot Ubiquiti Nano Beam Cron Job", on_cron);
 
@@ -137,7 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if !(matches.get_one::<bool>("help").unwrap_or(&false)) {
         reboot_router()?;
 
-        println!("Closing in 3 seconds ...");
+        info!("Closing in 3 seconds ...");
         thread::sleep(time::Duration::from_secs(3));
     }
 
